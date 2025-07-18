@@ -1,0 +1,6 @@
+langchain
+openai
+tinydb
+pillow
+python-dotenv
+pyrogram

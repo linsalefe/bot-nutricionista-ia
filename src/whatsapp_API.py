@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 import logging
 
 # Importa seu analisador de imagem com OpenAI GPT-4o
-from modules import image_analysis
+from src.modules import image_analysis
+
 
 # (Opcional) IA conversacional, com contexto, usando LangChain + OpenAI GPT-3.5/4
 from langchain_openai import ChatOpenAI

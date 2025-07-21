@@ -1,1 +1,1 @@
-web: python3 src/whatsapp_API.py
+web: gunicorn src.whatsapp_API:app

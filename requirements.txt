@@ -1,6 +1,7 @@
 langchain
-openai
+openai>=1.0.0
 tinydb
 pillow
 python-dotenv
 pyrogram
+langchain-openai

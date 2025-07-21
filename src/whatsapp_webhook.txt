@@ -1,0 +1,199 @@
+import os
+import requests
+import base64
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+import logging
+
+from modules import image_analysis
+
+# -- IA LangChain --
+from langchain_openai import ChatOpenAI
+from langchain.chains import ConversationChain
+from langchain.memory import ConversationBufferMemory
+
+# Logging PROFISSIONAL
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+# Carregar variáveis de ambiente
+load_dotenv()
+SECRET_KEY = os.getenv('SECRET_KEY')
+MEGA_API_BASE_URL = os.getenv('MEGA_API_BASE_URL')
+MEGA_API_TOKEN = os.getenv('MEGA_API_TOKEN')
+MEGA_INSTANCE_ID = os.getenv('MEGA_INSTANCE_ID')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+required_vars = {
+    'SECRET_KEY': SECRET_KEY,
+    'MEGA_API_BASE_URL': MEGA_API_BASE_URL,
+    'MEGA_API_TOKEN': MEGA_API_TOKEN,
+    'MEGA_INSTANCE_ID': MEGA_INSTANCE_ID,
+    'OPENAI_API_KEY': OPENAI_API_KEY
+}
+missing_vars = [var for var, value in required_vars.items() if not value]
+if missing_vars:
+    logger.error(f"❌ Variáveis de ambiente obrigatórias não encontradas: {missing_vars}")
+    exit(1)
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = SECRET_KEY
+
+# -- LangChain Configuração Simples (para exemplo de NLP Nutricionista) --
+llm = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-3.5-turbo", temperature=0.3)
+memorias = {}
+
+def resposta_ia(usuario_id, mensagem):
+    if usuario_id not in memorias:
+        memorias[usuario_id] = ConversationBufferMemory()
+    chain = ConversationChain(llm=llm, memory=memorias[usuario_id])
+    return chain.predict(input=mensagem)
+
+def send_whatsapp_message(phone_number: str, message: str) -> bool:
+    url = f"{MEGA_API_BASE_URL}/rest/sendMessage/{MEGA_INSTANCE_ID}/text"
+    headers = {
+        'Authorization': f'Bearer {MEGA_API_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    formatted_phone_number = phone_number if "@s.whatsapp.net" in phone_number else f"{phone_number}@s.whatsapp.net"
+    payload = {
+        "messageData": {
+            "to": formatted_phone_number,
+            "text": message
+        }
+    }
+    try:
+        logger.info(f"Enviando mensagem para {formatted_phone_number}")
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        logger.info(f"Mensagem enviada com sucesso! {response.json()}")
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao enviar mensagem: {e}")
+        return False
+
+def baixar_imagem_original_mega_api(mediaKey, directPath, url, mimetype, instance_key, mega_api_base_url, mega_api_token):
+    endpoint = f"{mega_api_base_url}/rest/instance/downloadMediaMessage/{instance_key}"
+    headers = {
+        "Authorization": f"Bearer {mega_api_token}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "messageKeys": {
+            "mediaKey": mediaKey,
+            "directPath": directPath,
+            "url": url,
+            "mimetype": mimetype,
+            "messageType": "image"
+        }
+    }
+    resp = requests.post(endpoint, headers=headers, json=body, timeout=30)
+    if resp.status_code == 200:
+        result = resp.json()
+        if not result.get("error") and result.get("data"):
+            return result["data"]  # base64 da imagem original
+    logger.error(f"Erro baixando imagem MegaAPI: {resp.text}")
+    return None
+
+def processar_imagem_whatsapp(data, usuario_id):
+    imgmsg = data.get('message', {}).get('imageMessage', {})
+    mediaKey = imgmsg.get('mediaKey')
+    directPath = imgmsg.get('directPath')
+    url = imgmsg.get('url')
+    mimetype = imgmsg.get('mimetype')
+    jpeg_thumbnail = imgmsg.get('jpegThumbnail')
+
+    # 1. Tenta baixar a imagem original (alta qualidade)
+    img_b64 = None
+    if mediaKey and directPath and url and mimetype:
+        img_b64 = baixar_imagem_original_mega_api(
+            mediaKey, directPath, url, mimetype,
+            MEGA_INSTANCE_ID, MEGA_API_BASE_URL, MEGA_API_TOKEN
+        )
+        if img_b64:
+            try:
+                # CONVERTE base64 EM BYTES!
+                img_bytes = base64.b64decode(img_b64)
+
+                # ------ ADICIONADO: Salvar arquivo para teste manual ------
+                with open("imagem_baixada_teste.jpg", "wb") as f:
+                    f.write(img_bytes)
+                logger.info("Imagem original salva como imagem_baixada_teste.jpg para debug/teste manual.")
+                # ----------------------------------------------------------
+
+                return image_analysis.analisar_imagem_gpt4o_bytes(img_bytes, OPENAI_API_KEY)
+            except Exception as e:
+                logger.error(f"Erro na análise OpenAI original: {e}")
+
+    # 2. Se falhar, usa thumbnail (mas OpenAI geralmente rejeita por ser imagem de baixa qualidade/compressão)
+    if jpeg_thumbnail:
+        logger.info("Falha ao usar original, tentando thumbnail...")
+        try:
+            img_bytes = base64.b64decode(jpeg_thumbnail)
+
+            # ------ ADICIONADO: Salvar thumb para teste manual ------
+            with open("thumbnail_teste.jpg", "wb") as f:
+                f.write(img_bytes)
+            logger.info("Thumbnail salva como thumbnail_teste.jpg para debug/teste manual.")
+            # --------------------------------------------------------
+
+            return image_analysis.analisar_imagem_gpt4o_bytes(img_bytes, OPENAI_API_KEY)
+        except Exception as e:
+            logger.error(f"Erro na análise OpenAI thumbnail: {e}")
+
+    return "Não foi possível identificar com precisão. Tente enviar outra imagem, de preferência bem enquadrada, iluminada e sem filtros!"
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.get_json()
+    logger.info(f"Webhook recebido: {data}")
+
+    message_type = data.get('messageType')
+    usuario_id = data.get('key', {}).get('remoteJid', None)
+
+    if message_type == "imageMessage":
+        logger.info(f"Recebida imagem de {usuario_id}")
+        resposta = processar_imagem_whatsapp(data, usuario_id)
+        send_whatsapp_message(usuario_id, resposta)
+        return jsonify({"status": "received-image", "resposta": resposta}), 200
+
+    elif message_type == "documentMessage":
+        doc_info = data.get('message', {}).get('documentMessage', {})
+        url = doc_info.get('url')
+        mimetype = doc_info.get('mimetype', '').lower()
+        filename = doc_info.get('fileName', '')
+        logger.info(f"Recebido documento de {usuario_id}: {filename} ({mimetype})")
+        if mimetype in ["image/jpeg", "image/png", "image/webp"]:
+            resposta = "Envio de documentos imagem por PDF/Arquivo ainda não suportado. Tente enviar como foto."
+        elif mimetype == "application/pdf":
+            resposta = "No momento, não consigo analisar PDF. Por favor, envie uma imagem do prato em JPEG, PNG ou WEBP."
+        else:
+            resposta = f"Arquivo {filename} não suportado para análise. Envie uma foto em JPEG, PNG ou WEBP."
+        send_whatsapp_message(usuario_id, resposta)
+        return jsonify({"status": "received-document", "resposta": resposta}), 200
+
+    elif message_type == "conversation":
+        mensagem = data.get('message', {}).get('conversation')
+        logger.info(f"Mensagem de texto recebida de {usuario_id}: {mensagem}")
+        if usuario_id and mensagem:
+            resposta = resposta_ia(usuario_id, mensagem)
+            send_whatsapp_message(usuario_id, resposta)
+            return jsonify({"status": "received", "resposta": resposta}), 200
+        else:
+            logger.warning("Mensagem ou número vazio! Ignorando.")
+            return jsonify({"status": "ignored"}), 200
+
+    else:
+        logger.info("Webhook recebido de tipo não suportado ou não implementado.")
+        return jsonify({"status": "ignored", "tipo": message_type}), 200
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)

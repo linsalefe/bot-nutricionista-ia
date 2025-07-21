@@ -1,29 +1,35 @@
 import openai
 import base64
-import imghdr
+from PIL import Image
+import io
 
 def analisar_imagem_gpt4o_bytes(img_bytes, openai_api_key):
     """
     Recebe bytes de uma imagem (jpeg/png/gif/webp), converte para base64
     e envia para o Vision.
     """
-    fmt = imghdr.what(None, img_bytes)
+    # Detecta o formato da imagem usando PIL
+    try:
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            fmt = img.format.lower()  # 'jpeg', 'png', 'gif', 'webp', etc.
+    except Exception:
+        return "Não consegui identificar o formato da imagem. Envie outra imagem."
+
     if fmt not in ["jpeg", "png", "gif", "webp"]:
         return "Formato de imagem não suportado."
 
     img_b64 = base64.b64encode(img_bytes).decode()
 
     prompt = (
-    "Você é um nutricionista. Analise a imagem enviada, identifique os alimentos principais visíveis, "
-    "estime a quantidade em gramas de cada item e faça uma análise nutricional para cada alimento. "
-    "Responda neste formato conciso (em português):\n\n"
-    "Arroz (100g): 130 kcal | 2.5g prot | 28g carb | 0.3g gord\n"
-    "Feijão (100g): 95 kcal | 5g prot | 17g carb | 0.5g gord\n"
-    "...\n"
-    "Total: ... kcal | ...g prot | ...g carb | ...g gord\n\n"
-    "Não explique nada além disso. Só liste os itens, os macros e o total."
-)
-
+        "Você é um nutricionista. Analise a imagem enviada, identifique os alimentos principais visíveis, "
+        "estime a quantidade em gramas de cada item e faça uma análise nutricional para cada alimento. "
+        "Responda neste formato conciso (em português):\n\n"
+        "Arroz (100g): 130 kcal | 2.5g prot | 28g carb | 0.3g gord\n"
+        "Feijão (100g): 95 kcal | 5g prot | 17g carb | 0.5g gord\n"
+        "...\n"
+        "Total: ... kcal | ...g prot | ...g carb | ...g gord\n\n"
+        "Não explique nada além disso. Só liste os itens, os macros e o total."
+    )
 
     try:
         client = openai.OpenAI(api_key=openai_api_key)
